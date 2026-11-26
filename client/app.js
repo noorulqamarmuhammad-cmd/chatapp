@@ -1,14 +1,15 @@
 (() => {
 const $ = s => document.querySelector(s), root = $('#root');
 const h = (t, a = {}, ...c) => { const e = document.createElement(t); for (const [k, v] of Object.entries(a)) { if (k.startsWith('on')) e.addEventListener(k.slice(2), v); else if (v !== false && v != null) e.setAttribute(k, v === true ? '' : v); } e.append(...c.flat(9).filter(x => x != null && x !== false)); return e; };
-const S = { token: localStorage.getItem('token'), me: null, convs: [], cur: null, msgs: {}, typing: {}, online: new Set(), call: null, reply: null, edit: null };
+const S = { token: localStorage.getItem('token'), me: null, convs: [], cur: null, msgs: {}, typing: {}, online: new Set(), call: null, reply: null, edit: null, friends: { friends: [], incoming: [], outgoing: [] } };
+let rec = null;
 const EMOJI = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 const conv = id => S.convs.find(c => c.id === id), cur = () => conv(S.cur);
 const other = c => c.members.find(m => m.id !== S.me.id) || S.me;
 const title = c => c.type === 'group' ? c.name : other(c).name;
 const hm = { hour: '2-digit', minute: '2-digit' };
 const fmt = t => { const d = new Date(t); return (d.toDateString() === new Date().toDateString() ? '' : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ') + d.toLocaleTimeString([], hm); };
-const preview = m => !m ? 'No messages yet' : m.deleted ? 'Message deleted' : m.kind === 'call' ? m.body : m.file_url && !m.body ? ({ image: '📷 Photo', video: '🎥 Video' }[m.kind] || '📎 ' + m.file_name) : m.body;
+const preview = m => !m ? 'No messages yet' : m.deleted ? 'Message deleted' : m.kind === 'call' ? m.body : m.file_url && !m.body ? ({ image: '📷 Photo', video: '🎥 Video', audio: '🎤 Voice message' }[m.kind] || '📎 ' + m.file_name) : m.body;
 const theme = () => { const t = localStorage.getItem('theme'); t ? document.documentElement.dataset.theme = t : delete document.documentElement.dataset.theme; };
 theme();
 
@@ -49,20 +50,25 @@ function authScreen(signup = false) {
     err, h('button', { class: 'btn' }, signup ? 'Create account' : 'Sign in'),
     h('button', { class: 'btn ghost', type: 'button', onclick: () => authScreen(!signup) }, signup ? 'I already have an account' : 'Create an account')));
 }
-function logout() { localStorage.removeItem('token'); S.sock?.close(); location.reload(); }
+async function logout() {
+  try { const sub = await (await navigator.serviceWorker?.getRegistration())?.pushManager.getSubscription(); if (sub) { await fetch('/api/push/unsubscribe', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + S.token }, body: JSON.stringify({ endpoint: sub.endpoint }) }); await sub.unsubscribe(); } } catch {}
+  localStorage.removeItem('token'); S.sock?.close(); location.reload();
+}
 
 // ---------- main layout ----------
 async function boot() {
   if (!S.token) return authScreen();
   try { S.me = await api('/me'); } catch { return authScreen(); }
-  connect(); await loadConvs();
+  connect(); await Promise.all([loadConvs(), loadFriends()]);
   root.replaceChildren(h('div', { class: 'app', id: 'app' },
     h('aside', { class: 'side' }, h('header', {}, h('button', { class: 'ic', 'aria-label': 'Your profile', onclick: settings }, avatar(S.me, 36)), h('strong', {}, 'Pulse'), h('span', { class: 'sp' }),
-      h('button', { class: 'ic', 'aria-label': 'New group', onclick: groupDialog }, '👥'), h('button', { class: 'ic', 'aria-label': 'Settings', onclick: settings }, '⚙️')),
+      h('button', { class: 'ic', 'aria-label': 'Friends and requests', onclick: friendsDialog }, '🤝', h('span', { id: 'frbadge', class: 'badge', hidden: true })), h('button', { class: 'ic', 'aria-label': 'New group', onclick: groupDialog }, '👥'), h('button', { class: 'ic', 'aria-label': 'Settings', onclick: settings }, '⚙️')),
       h('input', { id: 'q', type: 'search', placeholder: 'Search people and messages', 'aria-label': 'Search people and messages', oninput: debounce(search, 250) }), h('div', { id: 'list' })),
     h('main', { id: 'main' })));
   renderList(); renderChat();
-  if ('Notification' in window && Notification.permission === 'default') toast('Turn on desktop notifications? Open Settings to enable.');
+  paintBadge(); registerSW(); syncPush();
+  const deep = new URLSearchParams(location.search).get('c'); if (deep) { history.replaceState(null, '', '/'); openConv(+deep); }
+  if ('Notification' in window && Notification.permission === 'default') toast('Tap here to turn on notifications', settings);
 }
 const debounce = (f, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => f(...a), ms); }; };
 async function loadConvs() { S.convs = await api('/conversations'); }
@@ -75,16 +81,25 @@ function renderList() {
   l.replaceChildren(...(cs.length ? cs.map(c => h('button', { class: 'item' + (c.id === S.cur ? ' on' : ''), role: 'listitem', onclick: () => openConv(c.id) },
     avatar(c.type === 'group' ? { id: c.id, name: c.name } : other(c), 44),
     h('span', { class: 't' }, h('b', {}, title(c)), h('small', {}, S.typing[c.id] && Object.keys(S.typing[c.id]).length ? 'typing…' : preview(c.last))),
-    h('span', {}, c.last && h('small', {}, new Date(c.last.created).toLocaleTimeString([], hm)), h('div', { class: 'row end' }, c.pinned && '📌', c.muted && '🔇', c.unread > 0 && h('span', { class: 'badge', 'aria-label': c.unread + ' unread' }, c.unread))))) : [h('p', { class: 'empty' }, 'No chats yet. Search for a username above to start one.')]));
+    h('span', {}, c.last && h('small', {}, new Date(c.last.created).toLocaleTimeString([], hm)), h('div', { class: 'row end' }, c.pinned && '📌', c.muted && '🔇', c.unread > 0 && h('span', { class: 'badge', 'aria-label': c.unread + ' unread' }, c.unread))))) : [h('p', { class: 'empty' }, 'No chats yet. Search a username to send a friend request, then chat once they accept.')]));
 }
 async function search() {
   const q = $('#q').value.trim(); if (q.length < 2) return renderList();
   const [us, ms] = await Promise.all([api('/users?q=' + encodeURIComponent(q)), api('/search?q=' + encodeURIComponent(q))]);
-  $('#list').replaceChildren(...us.map(u => h('button', { class: 'item', onclick: async () => { const c = await api('/conversations', { method: 'POST', body: { userId: u.id } }); addConv(c); $('#q').value = ''; openConv(c.id); } }, avatar(u, 44), h('span', { class: 't' }, h('b', {}, u.name), h('small', {}, '@' + u.username + ' · ' + u.status)))),
+  $('#list').replaceChildren(...us.map(u => h('div', { class: 'item' }, avatar(u, 44), h('span', { class: 't' }, h('b', {}, u.name), h('small', {}, '@' + u.username)), relBtn(u))),
     ...ms.map(m => h('button', { class: 'item', onclick: () => { $('#q').value = ''; openConv(m.conv_id); } }, h('span', { class: 't' }, h('b', {}, conv(m.conv_id) ? title(conv(m.conv_id)) : 'Chat'), h('small', {}, m.body)), h('small', {}, fmt(m.created)))),
     !us.length && !ms.length && h('p', { class: 'empty' }, 'No people or messages match “' + q + '”.'));
 }
+function relBtn(u) {
+  const go = async (p, o) => { try { await api(p, o); await loadFriends(); search(); } catch (e) { toast(e.message); } };
+  if (u.relation === 'friend') return h('button', { class: 'btn', onclick: () => chatWith(u.id) }, 'Message');
+  if (u.relation === 'incoming') return h('button', { class: 'btn', onclick: () => go('/friends/' + u.id + '/accept', { method: 'POST' }) }, 'Accept');
+  if (u.relation === 'outgoing') return h('button', { class: 'btn ghost', 'aria-label': 'Cancel request to ' + u.name, onclick: () => go('/friends/' + u.id, { method: 'DELETE' }) }, 'Requested ✕');
+  return h('button', { class: 'btn', onclick: () => go('/friends/request', { method: 'POST', body: { userId: u.id } }) }, 'Add friend');
+}
+async function chatWith(id) { try { const c = await api('/conversations', { method: 'POST', body: { userId: id } }); addConv(c); const q = $('#q'); if (q) q.value = ''; document.querySelectorAll('dialog[open]').forEach(d => d.close()); renderList(); openConv(c.id); } catch (e) { toast(e.message); } }
 async function openConv(id) {
+  if (rec) endRec(false);
   S.cur = id; S.reply = S.edit = null;
   if (!conv(id)) await loadConvs();
   if (!S.msgs[id]) S.msgs[id] = await api(`/conversations/${id}/messages`);
@@ -109,12 +124,12 @@ function renderChat() {
       h('button', { class: 'ic', 'aria-label': c.pinned ? 'Unpin chat' : 'Pin chat', 'aria-pressed': c.pinned, onclick: () => patchConv({ pinned: !c.pinned }) }, '📌'),
       h('button', { class: 'ic', 'aria-label': c.muted ? 'Unmute notifications' : 'Mute notifications', 'aria-pressed': c.muted, onclick: () => patchConv({ muted: !c.muted }) }, c.muted ? '🔇' : '🔔')),
     h('div', { id: 'msgs', role: 'log', 'aria-live': 'polite' }), h('div', { id: 'bar' }),
-    h('div', { class: 'composer' }, h('button', { class: 'ic', 'aria-label': 'Attach a file', onclick: () => file.click() }, '📎'), file, input, h('button', { class: 'btn', onclick: send }, 'Send'))));
+    h('div', { class: 'composer' }, h('button', { class: 'ic', 'aria-label': 'Attach a file', onclick: () => file.click() }, '📎'), file, h('button', { class: 'ic', 'aria-label': 'Record a voice message', onclick: toggleRec }, '🎤'), input, h('button', { class: 'btn', onclick: send }, 'Send'))));
   renderMsgs(true); renderBar(); input.focus();
 }
 const patchConv = async p => { addConv(await api('/conversations/' + S.cur, { method: 'PATCH', body: p })); renderChat(); renderList(); };
 function renderBar() {
-  const b = $('#bar'); if (!b) return; const t = S.edit ? 'Editing message' : S.reply ? 'Replying: ' + (S.reply.body || S.reply.file_name) : null;
+  const b = $('#bar'); if (!b) return; if (rec) return paintRec(); const t = S.edit ? 'Editing message' : S.reply ? 'Replying: ' + (S.reply.body || S.reply.file_name) : null;
   b.className = t ? 'bar' : ''; b.replaceChildren(...(t ? [h('span', {}, t), h('button', { class: 'ic', 'aria-label': 'Cancel', onclick: () => { S.reply = S.edit = null; $('textarea').value = ''; renderBar(); } }, '✕')] : []));
 }
 let typingOn = false, typingT;
@@ -130,10 +145,38 @@ async function attach(f) {
   try { const a = await api('/upload', { method: 'POST', body: fd }); S.sock.emit('message:send', { conv_id: S.cur, body: $('textarea').value.trim(), attachment: a, reply_to: S.reply?.id }, r => r?.error && toast(r.error)); $('textarea').value = ''; S.reply = null; renderBar(); } catch (e) { toast(e.message); }
 }
 
+// ---------- voice messages ----------
+const mmss = ms => { const s = Math.round(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+async function toggleRec() {
+  if (rec) return endRec(true);
+  if (!navigator.mediaDevices || !window.MediaRecorder) return toast('Voice recording is not supported in this browser.');
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'].find(t => MediaRecorder.isTypeSupported(t));
+    const mr = new MediaRecorder(stream, mime ? { mimeType: mime } : {}), chunks = [];
+    mr.ondataavailable = e => e.data.size && chunks.push(e.data);
+    rec = { mr, stream, chunks, conv: S.cur, t0: Date.now(), send: false, mime: (mime || mr.mimeType || 'audio/webm').split(';')[0] };
+    mr.onstop = async () => {
+      const r = rec; clearInterval(r.timer); r.stream.getTracks().forEach(t => t.stop()); rec = null; renderBar();
+      if (!r.send || !r.chunks.length) return;
+      const ext = r.mime.includes('mp4') ? 'm4a' : r.mime.includes('ogg') ? 'ogg' : 'weba', fd = new FormData();
+      fd.append('file', new File(r.chunks, 'voice.' + ext, { type: r.mime }));
+      try { const a = await api('/upload', { method: 'POST', body: fd }); a.name = 'Voice message ' + mmss(Date.now() - r.t0); S.sock.emit('message:send', { conv_id: r.conv, attachment: a }, x => x?.error && toast(x.error)); } catch (e) { toast(e.message); }
+    };
+    mr.start(); rec.timer = setInterval(() => { paintRec(); if (rec && Date.now() - rec.t0 > 300000) endRec(true); }, 500); paintRec();
+  } catch { toast('Allow microphone access to record a voice message.'); }
+}
+function endRec(send) { if (!rec) return; rec.send = send; if (rec.mr.state !== 'inactive') rec.mr.stop(); }
+function paintRec() {
+  const b = $('#bar'); if (!b || !rec) return; const t = $('#recT'), txt = '🔴 Recording ' + mmss(Date.now() - rec.t0);
+  if (t) return void (t.textContent = txt);
+  b.className = 'bar'; b.replaceChildren(h('span', { id: 'recT', role: 'timer' }, txt), h('button', { class: 'ic', 'aria-label': 'Discard recording', onclick: () => endRec(false) }, '🗑️'), h('button', { class: 'btn', onclick: () => endRec(true) }, 'Send'));
+}
+
 function bubble(m, c) {
   if (m.kind === 'call') return h('div', { class: 'sys' }, '📞 ' + m.body + ' · ' + new Date(m.created).toLocaleTimeString([], hm));
   const mine = m.sender_id === S.me.id, who = c.members.find(u => u.id === m.sender_id);
-  const media = m.deleted ? null : m.kind === 'image' ? h('img', { src: m.file_url, alt: m.file_name || 'Image', loading: 'lazy' }) : m.kind === 'video' ? h('video', { src: m.file_url, controls: true, preload: 'metadata' }) : m.file_url ? h('a', { href: m.file_url, target: '_blank', rel: 'noopener', download: m.file_name }, '📎 ' + (m.file_name || 'File')) : null;
+  const media = m.deleted ? null : m.kind === 'image' ? h('img', { src: m.file_url, alt: m.file_name || 'Image', loading: 'lazy' }) : m.kind === 'video' ? h('video', { src: m.file_url, controls: true, preload: 'metadata' }) : m.kind === 'audio' ? h('audio', { src: m.file_url, controls: true, preload: 'metadata', 'aria-label': 'Voice message' }) : m.file_url ? h('a', { href: m.file_url, target: '_blank', rel: 'noopener', download: m.file_name }, '📎 ' + (m.file_name || 'File')) : null;
   const rx = Object.entries(m.reactions || {});
   const el = h('article', { class: 'm' + (mine ? ' me' : ''), 'data-id': m.id },
     !mine && c.type === 'group' && h('div', { class: 'who' }, who?.name || 'Someone'),
@@ -176,12 +219,13 @@ function notify(c, m) {
 // ---------- socket ----------
 function connect() {
   const s = S.sock = io({ auth: { token: S.token } });
-  s.on('connect', async () => { banner(); if (S.me && $('#app')) { await loadConvs(); if (S.cur) S.msgs[S.cur] = await api(`/conversations/${S.cur}/messages`); renderList(); renderMsgs(); markRead(); } });
+  s.on('connect', async () => { banner(); s.emit('vis', { visible: document.visibilityState === 'visible' }); if (S.me && $('#app')) { await loadConvs(); if (S.cur) S.msgs[S.cur] = await api(`/conversations/${S.cur}/messages`); renderList(); renderMsgs(); markRead(); } });
   s.on('disconnect', () => banner('Connection lost. Reconnecting…'));
   s.on('connect_error', e => e.message === 'unauthorized' ? logout() : banner('Can’t reach the server. Retrying…'));
   s.on('presence:list', l => { S.online = new Set(l); $('#sub') && cur() && ($('#sub').textContent = chatSub(cur())); });
   s.on('presence', p => { p.online ? S.online.add(p.user_id) : S.online.delete(p.user_id); $('#sub') && cur() && ($('#sub').textContent = chatSub(cur())); });
   s.on('conv:new', c => { addConv(c); renderList(); });
+  s.on('friend:update', async ({ type, from }) => { await loadFriends(); if (type === 'request') toast(from.name + ' sent you a friend request', friendsDialog); if (type === 'accepted') toast(from.name + ' accepted your friend request'); });
   s.on('message:new', async m => {
     if (!conv(m.conv_id)) await loadConvs();
     const c = conv(m.conv_id); if (!c) return;
@@ -200,13 +244,14 @@ function connect() {
   callEvents(s);
 }
 const focus = () => window.focus();
-window.addEventListener('focus', markRead); document.addEventListener('visibilitychange', markRead);
+window.addEventListener('focus', markRead); document.addEventListener('visibilitychange', () => { S.sock?.emit('vis', { visible: document.visibilityState === 'visible' }); markRead(); });
 
 // ---------- dialogs ----------
 function groupDialog() {
   const picked = new Map(), name = h('input', { placeholder: 'Group name', maxlength: 40, 'aria-label': 'Group name' }), res = h('div', { class: 'res' }), chips = h('div', { class: 'chips' });
   const paint = () => chips.replaceChildren(...[...picked.values()].map(u => h('button', { type: 'button', class: 'chip', 'aria-label': 'Remove ' + u.name, onclick: () => { picked.delete(u.id); paint(); } }, u.name + ' ✕')));
-  const q = h('input', { type: 'search', placeholder: 'Add people by name or username', 'aria-label': 'Add people', oninput: debounce(async () => { const r = q.value.length < 2 ? [] : await api('/users?q=' + encodeURIComponent(q.value)); res.replaceChildren(...r.map(u => h('button', { type: 'button', onclick: () => { picked.set(u.id, u); paint(); } }, u.name + ' @' + u.username))); }, 250) });
+  const show = () => { const t = q.value.toLowerCase(); res.replaceChildren(...(S.friends.friends.length ? S.friends.friends.filter(u => !t || u.name.toLowerCase().includes(t) || u.username.includes(t)).map(u => h('button', { type: 'button', onclick: () => { picked.set(u.id, u); paint(); } }, u.name + ' @' + u.username)) : [h('small', {}, 'Add friends first, then you can put them in a group.')])); };
+  const q = h('input', { type: 'search', placeholder: 'Choose from your friends', 'aria-label': 'Add friends', oninput: show }); show();
   dialog('New group', [name, q, res, chips], 'Create group', async () => { const c = await api('/conversations', { method: 'POST', body: { name: name.value, userIds: [...picked.keys()] } }); addConv(c); openConv(c.id); });
 }
 function settings() {
@@ -214,7 +259,7 @@ function settings() {
   const rr = h('input', { type: 'checkbox', checked: S.me.read_receipts, style: 'width:auto' }), th = h('select', {}, ['', 'light', 'dark'].map(v => h('option', { value: v, selected: (localStorage.getItem('theme') || '') === v }, v ? v[0].toUpperCase() + v.slice(1) : 'Match my device')));
   const pic = h('input', { type: 'file', accept: 'image/*', onchange: async () => { const fd = new FormData(); fd.append('file', pic.files[0]); try { S.me = await api('/me/avatar', { method: 'POST', body: fd }); toast('Profile photo updated'); } catch (e) { toast(e.message); } } });
   dialog('Settings', [h('label', {}, 'Name', name), h('label', {}, 'Status', status), h('label', {}, 'Profile photo', pic), h('label', { class: 'row' }, rr, 'Send read receipts'), h('label', {}, 'Theme', th),
-    h('button', { class: 'btn ghost', type: 'button', onclick: async () => toast(!('Notification' in window) ? 'This browser does not support notifications' : (await Notification.requestPermission()) === 'granted' ? 'Desktop notifications on' : 'Notifications are blocked in your browser settings') }, 'Enable desktop notifications'),
+    h('button', { class: 'btn ghost', type: 'button', onclick: enableNotifications }, 'Enable notifications'),
     h('button', { class: 'btn ghost', type: 'button', onclick: logout }, 'Sign out')], 'Save', async () => {
     S.me = await api('/me', { method: 'PATCH', body: { name: name.value, status: status.value, read_receipts: rr.checked } }); th.value ? localStorage.setItem('theme', th.value) : localStorage.removeItem('theme'); theme(); });
 }
@@ -252,6 +297,7 @@ function paintCall() {
   ctl.replaceChildren(...(c.state === 'incoming' ? [btn('grn', 'Accept call', '📞', acceptCall), btn('red', 'Decline call', '✕', () => S.sock.emit('call:decline', { callId: c.id }))] :
     [c.local && btn('', 'Mute microphone', '🎤', e => { const t = c.local.getAudioTracks()[0]; t.enabled = !t.enabled; e.currentTarget.style.opacity = t.enabled ? 1 : .5; }),
      c.video && c.local && btn('', 'Turn camera off', '📷', e => { const t = c.local.getVideoTracks()[0]; t.enabled = !t.enabled; e.currentTarget.style.opacity = t.enabled ? 1 : .5; }),
+     c.video && c.local && btn('', 'Switch between front and back camera', '🔄', flipCam),
      btn('red', c.state === 'ringing' ? 'Cancel call' : 'End call', '✕', hangup)]));
   (c.state === 'incoming' ? ctl.firstChild : ctl.lastChild)?.focus();
 }
@@ -274,6 +320,55 @@ function callEvents(s) {
     const msg = { missed: c.out ? `${c.peer.name} didn’t answer` : 'Missed call', declined: c.out ? `${c.peer.name} declined the call` : null, cancelled: c.out ? null : 'Call cancelled' }[reason];
     cleanupCall(); msg && toast(msg);
   });
+}
+// ---------- camera flip ----------
+async function flipCam() {
+  const c = S.call; if (!c?.local) return;
+  const prev = c.facing || 'user', next = prev === 'user' ? 'environment' : 'user', old = c.local.getVideoTracks()[0]; old?.stop();
+  const get = f => navigator.mediaDevices.getUserMedia({ video: { facingMode: { exact: f } } });
+  let ns; try { ns = await get(next); c.facing = next; } catch { try { ns = await get(prev); } catch { return toast('Couldn’t access the camera.'); } toast('No other camera found on this device.'); }
+  const nt = ns.getVideoTracks()[0], sender = c.pc?.getSenders().find(x => x.track?.kind === 'video');
+  old && c.local.removeTrack(old); c.local.addTrack(nt); await sender?.replaceTrack(nt);
+  lv.srcObject = c.local; lv.style.transform = (c.facing || 'user') === 'user' ? 'scaleX(-1)' : 'none'; paintCall();
+}
+
+// ---------- friends ----------
+let friendsBox = null;
+const loadFriends = async () => { S.friends = await api('/friends'); paintBadge(); paintFriends(); };
+function paintBadge() { const b = $('#frbadge'); if (b) { b.hidden = !S.friends.incoming.length; b.textContent = S.friends.incoming.length; } }
+function paintFriends() {
+  if (!friendsBox || !friendsBox.isConnected) return; const F = S.friends;
+  const act = (p, o) => async () => { try { await api(p, o); await loadFriends(); } catch (e) { toast(e.message); } };
+  const row = (u, ...btns) => h('div', { class: 'row' }, avatar(u, 36), h('span', { class: 'sp' }, h('b', {}, u.name), h('small', { style: 'display:block' }, '@' + u.username)), ...btns);
+  friendsBox.replaceChildren(
+    h('h3', {}, 'Requests (' + F.incoming.length + ')'),
+    ...(F.incoming.length ? F.incoming.map(u => row(u, h('button', { class: 'btn', onclick: act('/friends/' + u.id + '/accept', { method: 'POST' }) }, 'Accept'), h('button', { class: 'btn ghost', 'aria-label': 'Decline ' + u.name, onclick: act('/friends/' + u.id, { method: 'DELETE' }) }, 'Decline'))) : [h('small', {}, 'No pending requests')]),
+    h('h3', {}, 'Friends (' + F.friends.length + ')'),
+    ...(F.friends.length ? F.friends.map(u => row(u, h('button', { class: 'btn', onclick: () => chatWith(u.id) }, 'Message'), h('button', { class: 'btn ghost', 'aria-label': 'Remove ' + u.name, onclick: () => confirm('Remove ' + u.name + ' from your friends?') && act('/friends/' + u.id, { method: 'DELETE' })() }, 'Remove'))) : [h('small', {}, 'Search a username to send your first request')]),
+    F.outgoing.length > 0 && h('h3', {}, 'Sent requests'),
+    ...F.outgoing.map(u => row(u, h('button', { class: 'btn ghost', onclick: act('/friends/' + u.id, { method: 'DELETE' }) }, 'Cancel'))));
+}
+function friendsDialog() { friendsBox = h('div', { style: 'display:flex;flex-direction:column;gap:10px;max-height:60vh;overflow:auto' }); dialog('Friends', [friendsBox]); paintFriends(); }
+
+// ---------- push notifications (work with the app closed) ----------
+const b64 = s => Uint8Array.from(atob((s + '='.repeat((4 - s.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/')), ch => ch.charCodeAt(0));
+async function registerSW() {
+  if (!('serviceWorker' in navigator)) return;
+  try { await navigator.serviceWorker.register('/sw.js'); navigator.serviceWorker.addEventListener('message', e => e.data?.open && openConv(+e.data.open)); } catch (e) { console.warn('sw', e); }
+}
+async function syncPush() {
+  if (!('serviceWorker' in navigator && 'PushManager' in window) || !('Notification' in window) || Notification.permission !== 'granted') return false;
+  try {
+    const { key } = await api('/push/key'); if (!key) return false;
+    const reg = await navigator.serviceWorker.ready; let sub = await reg.pushManager.getSubscription();
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64(key) });
+    await api('/push/subscribe', { method: 'POST', body: sub.toJSON() }); return true;
+  } catch (e) { console.warn('push', e); return false; }
+}
+async function enableNotifications() {
+  if (!('Notification' in window)) return toast('This browser does not support notifications');
+  if ((await Notification.requestPermission()) !== 'granted') return toast('Notifications are blocked. Allow them in your browser or site settings.');
+  toast((await syncPush()) ? 'Notifications on, even when the app is closed' : 'Notifications on while the app is open. Push is not set up on the server yet.');
 }
 boot();
 })();

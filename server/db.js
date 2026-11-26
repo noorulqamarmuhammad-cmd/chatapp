@@ -10,7 +10,9 @@ function openDb(file) {
   create table if not exists messages(id integer primary key, conv_id integer not null references conversations(id), sender_id integer not null references users(id), kind text default 'text', body text default '', file_url text, file_name text, reply_to integer, edited integer default 0, deleted integer default 0, created integer);
   create index if not exists msg_conv on messages(conv_id,id);
   create table if not exists receipts(msg_id integer, user_id integer, state integer, primary key(msg_id,user_id));
-  create table if not exists reactions(msg_id integer, user_id integer, emoji text, primary key(msg_id,user_id,emoji));`);
+  create table if not exists reactions(msg_id integer, user_id integer, emoji text, primary key(msg_id,user_id,emoji));
+  create table if not exists push_subs(endpoint text primary key, user_id integer not null, p256dh text not null, auth text not null);
+  create table if not exists friendships(a integer, b integer, requester integer, status text, created integer, primary key(a,b));`);
   return db;
 }
 // Strip control characters, trim, cap length. Output is always rendered with textContent on the client.
@@ -46,4 +48,10 @@ function dmFor(db, a, b, create) {
   for (const u of [a, b]) db.prepare('insert into members(conv_id,user_id) values(?,?)').run(id, u);
   return { id, created: true };
 }
-module.exports = { openDb, clean, publicUser, isMember, memberIds, hydrate, convView, dmFor };
+const pair = (x, y) => x < y ? [x, y] : [y, x];
+function friendState(db, me, o) {
+  const [a, b] = pair(me, o), r = db.prepare('select requester,status from friendships where a=? and b=?').get(a, b);
+  return !r ? 'none' : r.status === 'accepted' ? 'friend' : r.requester === me ? 'outgoing' : 'incoming';
+}
+const areFriends = (db, x, y) => friendState(db, x, y) === 'friend';
+module.exports = { pair, friendState, areFriends, openDb, clean, publicUser, isMember, memberIds, hydrate, convView, dmFor };

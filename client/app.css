@@ -43,3 +43,5 @@ label{display:flex;flex-direction:column;gap:4px;font-weight:600}
 .back{display:none}
 @media(max-width:720px){.app{grid-template-columns:1fr}.app.chat-open .side,.app:not(.chat-open) main{display:none}.back{display:block}}
 @media(prefers-reduced-motion:no-preference){.toast{animation:in .2s ease-out}@keyframes in{from{transform:translateY(8px);opacity:0}}}
+.ic{position:relative}.ic .badge{position:absolute;top:2px;right:2px;font-size:11px;min-width:16px}
+.m audio{width:min(260px,70vw);display:block}dialog h3{margin:8px 0 0;font-size:15px}.item .btn{padding:6px 12px;flex:none}#call .lv{transform:scaleX(-1)}

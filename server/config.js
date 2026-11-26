@@ -9,6 +9,7 @@ module.exports = {
   maxUploadMb: +process.env.MAX_UPLOAD_MB || 15,
   authMax: +process.env.AUTH_RATE_LIMIT || 20,   // auth attempts per 15 min per IP
   msgBurst: +process.env.MSG_BURST || 20,         // messages per 10 s per socket
+  vapidPublic: process.env.VAPID_PUBLIC_KEY || '', vapidPrivate: process.env.VAPID_PRIVATE_KEY || '', vapidSubject: process.env.VAPID_SUBJECT || 'mailto:admin@example.com',
   bcryptRounds: 10,
   ringMs: 30000,                                  // unanswered call -> missed
 };

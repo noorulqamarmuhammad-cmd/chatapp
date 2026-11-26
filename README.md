@@ -31,6 +31,7 @@ Open two browsers (or one normal + one private window), sign up two users, searc
 | `MAX_UPLOAD_MB` | 15 | Upload size limit |
 | `AUTH_RATE_LIMIT` | 20 | Login/signup attempts per 15 min per IP |
 | `MSG_BURST` | 20 | Messages per 10 s per socket |
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | unset | Web Push keys. Run `npm run vapid` once and paste the three lines into your host's variables. Without them the app works but cannot notify a closed app. |
 
 ## Layout
 ```
@@ -40,8 +41,8 @@ test/    app.test.js  (auth + rate limit, delivery/receipts/edit/delete/react/se
 ```
 
 ## Known gaps
-- **Web Push (service worker + VAPID)** is not implemented: notifications are in-app toasts plus the browser Notification API while the tab is open but hidden. Closed-tab push is the next step.
-- **Calls** use a public STUN server only; add a TURN server to `ICE` in `client/app.js` for users behind strict NATs. One-to-one only, no ringtone sound.
+- **Push notifications** (messages, calls, friend requests) use a service worker and Web Push, so they arrive with the tab or browser closed. Android Chrome works after the user taps Enable notifications. On iPhone the site must first be added to the Home Screen (iOS 16.4+). A pushed call is a notification that opens the app, not a native ringing screen, and it expires after about 30 seconds.
+- **Calls** use a public STUN server only; add a TURN server to `ICE` in `client/app.js` for users behind strict NATs. One-to-one only, no ringtone sound. The camera-switch button needs a device with a second camera.
 - **Thumbnails** are not generated (images are scaled by CSS); uploads are checked by MIME type/size and stored under random names, not by magic-byte sniffing. Uploaded files are served by unguessable URL rather than per-request auth.
 - Group chats can't be edited after creation (no add/remove members). Pagination of older history is server-side (`?before=`) but the UI loads only the latest 50 messages.
 - Single-process only: presence and call state live in memory (use the Socket.IO Redis adapter to scale out).

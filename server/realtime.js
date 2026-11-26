@@ -1,13 +1,21 @@
 const jwt = require('jsonwebtoken'), D = require('./db');
 const EMOJI = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
-const KIND = { jpg: 'image', png: 'image', gif: 'image', webp: 'image', mp4: 'video', webm: 'video' };
+const KIND = { jpg: 'image', png: 'image', gif: 'image', webp: 'image', mp4: 'video', webm: 'video', weba: 'audio', m4a: 'audio', ogg: 'audio', mp3: 'audio' };
 
-module.exports = function attach(io, db, cfg) {
+module.exports = function attach(io, db, cfg, push = { send: async () => {} }) {
   const online = new Map(), calls = new Map(), inCall = new Map(); // userId->sockets, callId->call, userId->callId
   const room = u => 'u:' + u;
   const tell = (cid, ev, p) => D.memberIds(db, cid).forEach(u => io.to(room(u)).emit(ev, p));
   const contacts = uid => db.prepare('select distinct b.user_id id from members a join members b on a.conv_id=b.conv_id where a.user_id=? and b.user_id!=?').all(uid, uid).map(r => r.id);
 
+  // Push only if none of the user's open sockets reports a visible page (so we never double-notify).
+  async function notifyAway(uid, payload, cid) {
+    try {
+      if (cid && db.prepare('select muted from members where conv_id=? and user_id=?').get(cid, uid)?.muted) return;
+      if ((await io.in(room(uid)).fetchSockets()).some(x => x.data.visible === true)) return;
+      await push.send(uid, payload);
+    } catch (e) { console.error('push failed:', e.message); }
+  }
   // Record receipts (1 delivered, 2 read) for a user's pending messages and tell the conversation.
   function receive(uid, state, cid = 0) {
     const rows = db.prepare(`select m.id, m.conv_id from messages m join members mb on mb.conv_id=m.conv_id and mb.user_id=@u
@@ -48,14 +56,18 @@ module.exports = function attach(io, db, cfg) {
     friends.forEach(f => io.to(room(f)).emit('presence', { user_id: uid, online: true }));
     s.emit('presence:list', friends.filter(f => online.has(f)));
     receive(uid, 1); // everything sent while offline is now delivered
+    for (const c of calls.values()) if (c.to === uid && !c.answeredAt) s.emit('call:incoming', { callId: c.id, video: c.video, from: D.publicUser(db.prepare('select * from users where id=?').get(c.from)) }); // ringing while the app was opening
 
     const allow = () => { const n = Date.now(); hits = hits.filter(t => n - t < 10000); if (hits.length >= cfg.msgBurst) return false; hits.push(n); return true; };
     const msgOf = id => db.prepare('select * from messages where id=?').get(id);
     const own = id => { const m = msgOf(+id); return m && m.sender_id === uid && !m.deleted && m.kind !== 'call' ? m : null; };
 
+    s.on('vis', ({ visible } = {}) => { s.data.visible = !!visible; });
     s.on('message:send', (d, ack = () => {}) => {
       if (!allow()) return ack({ error: 'You are sending messages too fast' });
       const cid = +d?.conv_id; if (!D.isMember(db, cid, uid)) return ack({ error: 'You are not in this conversation' });
+      const cv = db.prepare('select type,name from conversations where id=?').get(cid);
+      if (cv.type === 'dm' && !D.areFriends(db, uid, D.memberIds(db, cid).find(u => u !== uid))) return ack({ error: 'You can only message friends' });
       const body = D.clean(d.body); let url = null, name = null, kind = 'text';
       if (d.attachment) {
         const a = d.attachment;
@@ -69,6 +81,8 @@ module.exports = function attach(io, db, cfg) {
       db.prepare('update members set last_read_id=? where conv_id=? and user_id=?').run(id, cid, uid);
       tell(cid, 'message:new', D.hydrate(db, msgOf(id)));
       D.memberIds(db, cid).filter(u => u !== uid && online.has(u)).forEach(u => receive(u, 1, cid));
+      const label = body || ({ image: '📷 Photo', video: '🎥 Video', audio: '🎤 Voice message' }[kind] || '📎 ' + name);
+      D.memberIds(db, cid).filter(u => u !== uid).forEach(u => notifyAway(u, { title: cv.type === 'group' ? `${cv.name} · ${s.user.name}` : s.user.name, body: label.slice(0, 140), conv_id: cid, kind: 'message', tag: 'c' + cid }, cid));
       ack({ ok: true, id: +id });
     });
     s.on('message:read', ({ conv_id } = {}) => {
@@ -101,13 +115,15 @@ module.exports = function attach(io, db, cfg) {
     // ---- call signaling: invite -> ring -> accept/decline -> SDP/ICE relay -> end ----
     s.on('call:invite', ({ to, video } = {}, ack = () => {}) => {
       to = +to; if (!to || to === uid || !db.prepare('select 1 from users where id=?').get(to)) return ack({ error: 'Unknown user' });
+      if (!D.areFriends(db, uid, to)) return ack({ error: 'You can only call friends' });
       if (inCall.has(uid)) return ack({ error: 'You are already in a call' });
-      if (!online.has(to)) { logCall({ from: uid, to, video }, `Missed ${video ? 'video' : 'voice'} call`); return ack({ error: 'They are offline right now' }); }
+      if (!online.has(to)) { logCall({ from: uid, to, video }, `Missed ${video ? 'video' : 'voice'} call`); notifyAway(to, { title: 'Missed call', body: `${s.user.name} tried to ${video ? 'video ' : ''}call you`, kind: 'message', tag: 'call' }); return ack({ error: 'They are offline right now' }); }
       if (inCall.has(to)) return ack({ error: 'They are on another call' });
       const callId = require('crypto').randomUUID();
       const call = { id: callId, from: uid, to, video: !!video, timer: setTimeout(() => endCall(callId, 'missed'), cfg.ringMs) };
       calls.set(callId, call); inCall.set(uid, callId); inCall.set(to, callId);
       io.to(room(to)).emit('call:incoming', { callId, video: call.video, from: D.publicUser(s.user) });
+      notifyAway(to, { title: `${s.user.name} is calling`, body: call.video ? 'Video call' : 'Voice call', kind: 'call', tag: 'call', requireInteraction: true });
       ack({ ok: true, callId });
     });
     const mine = id => { const c = calls.get(id); return c && (c.from === uid || c.to === uid) ? c : null; };
@@ -127,4 +143,5 @@ module.exports = function attach(io, db, cfg) {
       contacts(uid).forEach(f => io.to(room(f)).emit('presence', { user_id: uid, online: false }));
     });
   });
+  return { notifyAway };
 };
