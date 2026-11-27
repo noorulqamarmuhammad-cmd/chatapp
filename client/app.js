@@ -1,7 +1,7 @@
 (() => {
 const $ = s => document.querySelector(s), root = $('#root');
-const h = (t, a = {}, ...c) => { const e = document.createElement(t); for (const [k, v] of Object.entries(a)) { if (k.startsWith('on')) e.addEventListener(k.slice(2), v); else if (v !== false && v != null) e.setAttribute(k, v === true ? '' : v); } e.append(...c.flat(9).filter(x => x != null && x !== false)); return e; };
-const S = { token: localStorage.getItem('token'), me: null, convs: [], cur: null, msgs: {}, typing: {}, online: new Set(), call: null, reply: null, edit: null, friends: { friends: [], incoming: [], outgoing: [] } };
+const h = (t, a = {}, ...c) => { const e = document.createElement(t); for (const [k, v] of Object.entries(a)) { if (k.startsWith('on')) e.addEventListener(k.slice(2), v); else if (k === 'style') e.style.cssText = v; else if (v !== false && v != null) e.setAttribute(k, v === true ? '' : v); } e.append(...c.flat(9).filter(x => x != null && x !== false)); return e; };
+const S = { token: localStorage.getItem('token'), me: null, convs: [], cur: null, msgs: {}, typing: {}, online: new Set(), call: null, reply: null, edit: null, friends: { friends: [], incoming: [], outgoing: [] }, seen: {}, pending: {}, drafts: {}, below: 0 };
 let rec = null;
 const EMOJI = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 const conv = id => S.convs.find(c => c.id === id), cur = () => conv(S.cur);
@@ -115,7 +115,8 @@ function renderChat() {
   $('#app')?.classList.toggle('chat-open', !!S.cur);
   const main = $('#main'); if (!main) return; const c = cur();
   if (!c) return main.replaceChildren(h('div', { class: 'empty' }, h('div', {}, h('h2', {}, 'Pick a chat'), h('p', {}, 'Choose a conversation, or search for someone by username to say hello.'))));
-  const input = h('textarea', { rows: 1, placeholder: 'Write a message', 'aria-label': 'Message', maxlength: 4000, onkeydown: e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } if (e.key === 'Escape') { S.reply = S.edit = null; renderBar(); } }, oninput: onType });
+  const input = h('textarea', { rows: 1, placeholder: 'Write a message', 'aria-label': 'Message', maxlength: 4000, onkeydown: e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } if (e.key === 'Escape') { S.reply = S.edit = null; renderBar(); } }, oninput: () => { onType(); S.drafts[S.cur] = input.value; grow(input); } });
+  input.value = S.drafts[S.cur] || ''; setTimeout(() => grow(input));
   const file = h('input', { type: 'file', hidden: true, accept: 'image/*,video/mp4,video/webm,application/pdf,text/plain', onchange: () => attach(file.files[0]) });
   main.replaceChildren(h('section', { class: 'chat' },
     h('header', {}, h('button', { class: 'ic back', 'aria-label': 'Back to chats', onclick: () => { S.cur = null; renderChat(); } }, '←'), avatar(c.type === 'group' ? { id: c.id, name: c.name } : other(c), 40),
@@ -123,9 +124,10 @@ function renderChat() {
       c.type === 'dm' && h('button', { class: 'ic', 'aria-label': 'Voice call', onclick: () => startCall(false) }, '📞'), c.type === 'dm' && h('button', { class: 'ic', 'aria-label': 'Video call', onclick: () => startCall(true) }, '🎥'),
       h('button', { class: 'ic', 'aria-label': c.pinned ? 'Unpin chat' : 'Pin chat', 'aria-pressed': c.pinned, onclick: () => patchConv({ pinned: !c.pinned }) }, '📌'),
       h('button', { class: 'ic', 'aria-label': c.muted ? 'Unmute notifications' : 'Mute notifications', 'aria-pressed': c.muted, onclick: () => patchConv({ muted: !c.muted }) }, c.muted ? '🔇' : '🔔')),
-    h('div', { id: 'msgs', role: 'log', 'aria-live': 'polite' }), h('div', { id: 'bar' }),
-    h('div', { class: 'composer' }, h('button', { class: 'ic', 'aria-label': 'Attach a file', onclick: () => file.click() }, '📎'), file, h('button', { class: 'ic', 'aria-label': 'Record a voice message', onclick: toggleRec }, '🎤'), input, h('button', { class: 'btn', onclick: send }, 'Send'))));
-  renderMsgs(true); renderBar(); input.focus();
+    h('div', { class: 'stage' }, bubbles(), h('div', { id: 'msgs', role: 'log', 'aria-live': 'polite', onscroll: paintJump }), h('button', { id: 'jump', class: 'jump', hidden: true, 'aria-label': 'Jump to latest messages', onclick: () => { const b = $('#msgs'); b.scrollTo({ top: b.scrollHeight, behavior: 'smooth' }); } })),
+    h('div', { id: 'tp', class: 'tp', role: 'status', hidden: true }), h('div', { id: 'bar' }),
+    h('div', { class: 'composer' }, h('button', { class: 'ic emo-btn', 'aria-label': 'Insert emoji', onclick: emojiPicker }, '😊'), h('button', { class: 'ic', 'aria-label': 'Attach a file', onclick: () => file.click() }, '📎'), file, h('button', { class: 'ic', 'aria-label': 'Record a voice message', onclick: toggleRec }, '🎤'), input, h('button', { class: 'btn', onclick: send }, 'Send'))));
+  renderMsgs(true); renderBar(); paintTyping(); input.focus();
 }
 const patchConv = async p => { addConv(await api('/conversations/' + S.cur, { method: 'PATCH', body: p })); renderChat(); renderList(); };
 function renderBar() {
@@ -136,9 +138,24 @@ let typingOn = false, typingT;
 function onType() { if (!typingOn) { typingOn = true; S.sock.emit('typing', { conv_id: S.cur, on: true }); } clearTimeout(typingT); typingT = setTimeout(() => { typingOn = false; S.sock.emit('typing', { conv_id: S.cur, on: false }); }, 2000); }
 function send() {
   const ta = $('textarea'), body = ta.value.trim(); if (!body) return;
-  const done = r => r?.error && toast(r.error);
-  if (S.edit) S.sock.emit('message:edit', { id: S.edit.id, body }, done); else S.sock.emit('message:send', { conv_id: S.cur, body, reply_to: S.reply?.id }, done);
-  ta.value = ''; S.reply = S.edit = null; renderBar(); typingOn = false; S.sock.emit('typing', { conv_id: S.cur, on: false });
+  if (S.edit) S.sock.emit('message:edit', { id: S.edit.id, body }, r => r?.error && toast(r.error));
+  else { const p = { conv: S.cur, body, reply_to: S.reply?.id, state: 'queued' }; (S.pending[S.cur] ??= []).push(p); if (S.sock.connected) deliver(p); blip(880); }
+  ta.value = ''; S.drafts[S.cur] = ''; grow(ta); S.reply = S.edit = null; renderBar(); typingOn = false; S.sock.emit('typing', { conv_id: S.cur, on: false }); renderMsgs(true);
+  const b = $('.composer .btn'); b.classList.remove('pulse'); void b.offsetWidth; b.classList.add('pulse');
+}
+// Offline-safe sending: messages wait in a visible outbox and are sent on reconnect; failures can be retried.
+function deliver(p) {
+  p.state = 'sending';
+  S.sock.timeout(10000).emit('message:send', { conv_id: p.conv, body: p.body, reply_to: p.reply_to }, (err, r) => {
+    if (err || r?.error) { p.state = 'failed'; p.err = r?.error || 'no confirmation from the server'; } else S.pending[p.conv] = S.pending[p.conv].filter(x => x !== p);
+    renderMsgs();
+  });
+}
+function pendingBubble(p) {
+  const failed = p.state === 'failed', drop = () => { S.pending[p.conv] = S.pending[p.conv].filter(x => x !== p); renderMsgs(); };
+  return h('article', { class: 'm me pending' + (failed ? ' failed' : '') }, p.reply_to && h('div', { class: 'quote' }, 'Reply'), h('p', {}, linkify(p.body)),
+    h('div', { class: 'meta' }, failed ? 'Not sent: ' + p.err : p.state === 'queued' ? '🕓 Waiting for connection…' : '🕓 Sending…',
+      failed && [h('button', { class: 'lnk', onclick: () => S.sock.connected ? deliver(p) : (p.state = 'queued', renderMsgs()) }, 'Retry'), h('button', { class: 'lnk', onclick: drop }, 'Delete')]));
 }
 async function attach(f) {
   if (!f) return; const fd = new FormData(); fd.append('file', f);
@@ -173,16 +190,16 @@ function paintRec() {
   b.className = 'bar'; b.replaceChildren(h('span', { id: 'recT', role: 'timer' }, txt), h('button', { class: 'ic', 'aria-label': 'Discard recording', onclick: () => endRec(false) }, '🗑️'), h('button', { class: 'btn', onclick: () => endRec(true) }, 'Send'));
 }
 
-function bubble(m, c) {
+function bubble(m, c, pop) {
   if (m.kind === 'call') return h('div', { class: 'sys' }, '📞 ' + m.body + ' · ' + new Date(m.created).toLocaleTimeString([], hm));
   const mine = m.sender_id === S.me.id, who = c.members.find(u => u.id === m.sender_id);
-  const media = m.deleted ? null : m.kind === 'image' ? h('img', { src: m.file_url, alt: m.file_name || 'Image', loading: 'lazy' }) : m.kind === 'video' ? h('video', { src: m.file_url, controls: true, preload: 'metadata' }) : m.kind === 'audio' ? h('audio', { src: m.file_url, controls: true, preload: 'metadata', 'aria-label': 'Voice message' }) : m.file_url ? h('a', { href: m.file_url, target: '_blank', rel: 'noopener', download: m.file_name }, '📎 ' + (m.file_name || 'File')) : null;
+  const media = m.deleted ? null : m.kind === 'image' ? h('img', { class: 'zoom', src: m.file_url, alt: m.file_name || 'Image', loading: 'lazy', onclick: () => dialog('Photo', [h('img', { class: 'big', src: m.file_url, alt: m.file_name || 'Image' })]) }) : m.kind === 'video' ? h('video', { src: m.file_url, controls: true, preload: 'metadata' }) : m.kind === 'audio' ? h('audio', { src: m.file_url, controls: true, preload: 'metadata', 'aria-label': 'Voice message' }) : m.file_url ? h('a', { href: m.file_url, target: '_blank', rel: 'noopener', download: m.file_name }, '📎 ' + (m.file_name || 'File')) : null;
   const rx = Object.entries(m.reactions || {});
-  const el = h('article', { class: 'm' + (mine ? ' me' : ''), 'data-id': m.id },
+  const el = h('article', { class: 'm' + (mine ? ' me' : '') + (pop ? ' pop' : ''), 'data-id': m.id, ondblclick: ev => { if (!m.deleted) { S.sock.emit('reaction', { id: m.id, emoji: '❤️' }); burst(ev.clientX, ev.clientY, '❤️'); } } },
     !mine && c.type === 'group' && h('div', { class: 'who' }, who?.name || 'Someone'),
     m.reply && h('div', { class: 'quote' }, h('b', {}, (c.members.find(u => u.id === m.reply.sender_id)?.name || '') + ' '), m.reply.body.slice(0, 80)),
-    media, (m.body || m.deleted) && h('p', { class: m.deleted ? 'muted' : '' }, m.deleted ? 'This message was deleted' : m.body),
-    rx.length > 0 && h('div', { class: 'rx' }, rx.map(([e, us]) => h('button', { class: us.includes(S.me.id) ? 'mine' : '', 'aria-label': `${e} from ${us.length}`, onclick: () => S.sock.emit('reaction', { id: m.id, emoji: e }) }, e + ' ' + us.length))),
+    media, (m.body || m.deleted) && h('p', { class: m.deleted ? 'muted' : '' }, m.deleted ? 'This message was deleted' : linkify(m.body)),
+    rx.length > 0 && h('div', { class: 'rx' }, rx.map(([e, us]) => h('button', { class: us.includes(S.me.id) ? 'mine' : '', 'aria-label': `${e} from ${us.length}`, onclick: ev => { S.sock.emit('reaction', { id: m.id, emoji: e }); burst(ev.clientX, ev.clientY, e); } }, e + ' ' + us.length))),
     h('div', { class: 'meta' }, m.edited && !m.deleted && 'edited', new Date(m.created).toLocaleTimeString([], hm), mine && !m.deleted && h('span', { class: 'tick ' + m.status, 'aria-label': m.status }, m.status === 'sent' ? '✓' : '✓✓')),
     !m.deleted && h('button', { class: 'ic more', 'aria-label': 'Message actions', 'aria-haspopup': 'menu', onclick: e => { e.stopPropagation(); menu(el, m, mine); } }, '⋯'));
   return el;
@@ -190,21 +207,25 @@ function bubble(m, c) {
 function menu(el, m, mine) {
   document.querySelectorAll('.menu').forEach(x => x.remove());
   const item = (t, f) => h('button', { role: 'menuitem', onclick: () => { mm.remove(); f(); } }, t);
-  const mm = h('div', { class: 'menu', role: 'menu' }, h('div', { class: 'emo' }, EMOJI.map(e => h('button', { 'aria-label': 'React ' + e, onclick: () => { mm.remove(); S.sock.emit('reaction', { id: m.id, emoji: e }); } }, e))),
+  const mm = h('div', { class: 'menu', role: 'menu' }, h('div', { class: 'emo' }, EMOJI.map(e => h('button', { 'aria-label': 'React ' + e, onclick: ev => { mm.remove(); S.sock.emit('reaction', { id: m.id, emoji: e }); burst(ev.clientX, ev.clientY, e); } }, e))),
     item('Reply', () => { S.reply = m; S.edit = null; renderBar(); $('textarea').focus(); }),
+    m.kind === 'text' && item('Copy', () => navigator.clipboard?.writeText(m.body).then(() => toast('Copied')).catch(() => toast('Couldn’t copy'))),
     mine && m.kind === 'text' && item('Edit', () => { S.edit = m; S.reply = null; $('textarea').value = m.body; renderBar(); $('textarea').focus(); }),
     mine && item('Delete', () => confirm('Delete this message for everyone?') && S.sock.emit('message:delete', { id: m.id })));
   el.append(mm); mm.querySelector('button').focus();
 }
-document.addEventListener('click', () => document.querySelectorAll('.menu').forEach(x => x.remove()));
-document.addEventListener('keydown', e => e.key === 'Escape' && document.querySelectorAll('.menu').forEach(x => x.remove()));
+document.addEventListener('click', () => document.querySelectorAll('.menu,.emojis').forEach(x => x.remove()));
+document.addEventListener('keydown', e => e.key === 'Escape' && document.querySelectorAll('.menu,.emojis').forEach(x => x.remove()));
 function renderMsgs(bottom) {
   const box = $('#msgs'), c = cur(); if (!box || !c) return;
-  const near = bottom || box.scrollHeight - box.scrollTop - box.clientHeight < 120;
-  box.replaceChildren(...(S.msgs[c.id] || []).map(m => bubble(m, c)));
-  if (!(S.msgs[c.id] || []).length) box.append(h('p', { class: 'empty' }, 'No messages yet. Say hello.'));
-  if (near) box.scrollTop = box.scrollHeight;
+  const near = bottom || box.scrollHeight - box.scrollTop - box.clientHeight < 120, seen = S.seen[c.id], list = S.msgs[c.id] || [], nodes = []; let day = '';
+  for (const m of list) { const d = dayLabel(m.created); if (d !== day) { day = d; nodes.push(h('div', { class: 'day' }, d)); } nodes.push(bubble(m, c, seen !== undefined && m.id > seen)); }
+  (S.pending[c.id] || []).forEach(p => nodes.push(pendingBubble(p)));
+  if (!nodes.length) nodes.push(h('p', { class: 'empty' }, 'No messages yet. Say hello.'));
+  box.replaceChildren(...nodes); S.seen[c.id] = list.reduce((a, m) => Math.max(a, m.id), 0);
+  if (near) box.scrollTop = box.scrollHeight; paintJump();
 }
+const dayLabel = t => { const d = new Date(t), n = new Date(); return d.toDateString() === n.toDateString() ? 'Today' : d.toDateString() === new Date(n - 864e5).toDateString() ? 'Yesterday' : d.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' }); };
 function patchMsg(m) { const a = S.msgs[m.conv_id]; if (!a) return; const i = a.findIndex(x => x.id === m.id); i < 0 ? a.push(m) : (a[i] = m); }
 
 // ---------- notifications ----------
@@ -219,7 +240,7 @@ function notify(c, m) {
 // ---------- socket ----------
 function connect() {
   const s = S.sock = io({ auth: { token: S.token } });
-  s.on('connect', async () => { banner(); s.emit('vis', { visible: document.visibilityState === 'visible' }); if (S.me && $('#app')) { await loadConvs(); if (S.cur) S.msgs[S.cur] = await api(`/conversations/${S.cur}/messages`); renderList(); renderMsgs(); markRead(); } });
+  s.on('connect', async () => { banner(); s.emit('vis', { visible: document.visibilityState === 'visible' }); Object.values(S.pending).flat().filter(p => p.state === 'queued').forEach(deliver); if (S.me && $('#app')) { await loadConvs(); if (S.cur) S.msgs[S.cur] = await api(`/conversations/${S.cur}/messages`); renderList(); renderMsgs(); markRead(); } });
   s.on('disconnect', () => banner('Connection lost. Reconnecting…'));
   s.on('connect_error', e => e.message === 'unauthorized' ? logout() : banner('Can’t reach the server. Retrying…'));
   s.on('presence:list', l => { S.online = new Set(l); $('#sub') && cur() && ($('#sub').textContent = chatSub(cur())); });
@@ -229,16 +250,17 @@ function connect() {
   s.on('message:new', async m => {
     if (!conv(m.conv_id)) await loadConvs();
     const c = conv(m.conv_id); if (!c) return;
-    patchMsg(m); c.last = m;
+    const bx = $('#msgs'), away = S.cur === c.id && bx && bx.scrollHeight - bx.scrollTop - bx.clientHeight >= 120;
+    patchMsg(m); c.last = m; delete S.typing[c.id]?.[m.sender_id]; paintTyping();
     const seen = S.cur === c.id && document.visibilityState === 'visible';
-    if (m.sender_id !== S.me.id) { if (seen) markRead(); else c.unread++; notify(c, m); }
-    renderList(); if (S.cur === c.id) renderMsgs();
+    if (m.sender_id !== S.me.id) { if (seen) { markRead(); blip(660); } else c.unread++; notify(c, m); }
+    renderList(); if (S.cur === c.id) { renderMsgs(); if (away && m.sender_id !== S.me.id) S.below++; paintJump(); }
   });
   s.on('message:update', m => { patchMsg(m); const c = conv(m.conv_id); if (c?.last?.id === m.id) c.last = m; renderList(); if (S.cur === m.conv_id) renderMsgs(); });
   s.on('status', ({ conv_id, items }) => { for (const i of items) { const m = S.msgs[conv_id]?.find(x => x.id === i.id); if (m) m.status = i.status; } if (S.cur === conv_id) renderMsgs(); });
-  s.on('typing', ({ conv_id, user_id, on }) => {
+  s.on('typing', ({ conv_id, user_id, on }) => { setTimeout(paintTyping, 0);
     const t = S.typing[conv_id] ??= {}; clearTimeout(t[user_id]); delete t[user_id];
-    if (on) t[user_id] = setTimeout(() => { delete t[user_id]; renderList(); $('#sub') && cur() && ($('#sub').textContent = chatSub(cur())); }, 4000);
+    if (on) t[user_id] = setTimeout(() => { delete t[user_id]; renderList(); paintTyping(); $('#sub') && cur() && ($('#sub').textContent = chatSub(cur())); }, 4000);
     renderList(); $('#sub') && cur() && ($('#sub').textContent = chatSub(cur()));
   });
   callEvents(s);
@@ -256,12 +278,12 @@ function groupDialog() {
 }
 function settings() {
   const name = h('input', { value: S.me.name, maxlength: 40 }), status = h('input', { value: S.me.status, maxlength: 120 });
-  const rr = h('input', { type: 'checkbox', checked: S.me.read_receipts, style: 'width:auto' }), th = h('select', {}, ['', 'light', 'dark'].map(v => h('option', { value: v, selected: (localStorage.getItem('theme') || '') === v }, v ? v[0].toUpperCase() + v.slice(1) : 'Match my device')));
+  const snd = h('input', { type: 'checkbox', checked: localStorage.getItem('sound') !== 'off', style: 'width:auto' }), rr = h('input', { type: 'checkbox', checked: S.me.read_receipts, style: 'width:auto' }), th = h('select', {}, ['', 'light', 'dark'].map(v => h('option', { value: v, selected: (localStorage.getItem('theme') || '') === v }, v ? v[0].toUpperCase() + v.slice(1) : 'Match my device')));
   const pic = h('input', { type: 'file', accept: 'image/*', onchange: async () => { const fd = new FormData(); fd.append('file', pic.files[0]); try { S.me = await api('/me/avatar', { method: 'POST', body: fd }); toast('Profile photo updated'); } catch (e) { toast(e.message); } } });
-  dialog('Settings', [h('label', {}, 'Name', name), h('label', {}, 'Status', status), h('label', {}, 'Profile photo', pic), h('label', { class: 'row' }, rr, 'Send read receipts'), h('label', {}, 'Theme', th),
+  dialog('Settings', [h('label', {}, 'Name', name), h('label', {}, 'Status', status), h('label', {}, 'Profile photo', pic), h('label', { class: 'row' }, rr, 'Send read receipts'), h('label', { class: 'row' }, snd, 'Message sounds'), h('label', {}, 'Theme', th),
     h('button', { class: 'btn ghost', type: 'button', onclick: enableNotifications }, 'Enable notifications'),
     h('button', { class: 'btn ghost', type: 'button', onclick: logout }, 'Sign out')], 'Save', async () => {
-    S.me = await api('/me', { method: 'PATCH', body: { name: name.value, status: status.value, read_receipts: rr.checked } }); th.value ? localStorage.setItem('theme', th.value) : localStorage.removeItem('theme'); theme(); });
+    S.me = await api('/me', { method: 'PATCH', body: { name: name.value, status: status.value, read_receipts: rr.checked } }); th.value ? localStorage.setItem('theme', th.value) : localStorage.removeItem('theme'); localStorage.setItem('sound', snd.checked ? 'on' : 'off'); theme(); });
 }
 
 // ---------- calls (WebRTC; signaling over the socket) ----------
@@ -321,6 +343,41 @@ function callEvents(s) {
     cleanupCall(); msg && toast(msg);
   });
 }
+// ---------- feel: fixed layout, ripples, bubbles, typing, jump, emoji, sounds ----------
+const fit = () => { document.documentElement.style.setProperty('--app-h', (window.visualViewport?.height || innerHeight) + 'px'); window.scrollTo(0, 0); };
+window.visualViewport?.addEventListener('resize', fit); window.visualViewport?.addEventListener('scroll', fit); addEventListener('resize', fit); fit();
+const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+document.addEventListener('pointerdown', e => {
+  const el = e.target.closest('button,.item'); if (!el || reduced()) return;
+  const r = el.getBoundingClientRect(), z = Math.max(r.width, r.height) * 2, s = h('span', { class: 'ripple', 'aria-hidden': 'true' });
+  s.style.cssText = `width:${z}px;height:${z}px;left:${e.clientX - r.left - z / 2}px;top:${e.clientY - r.top - z / 2}px`; el.append(s); s.addEventListener('animationend', () => s.remove());
+});
+function burst(x, y, emoji) {
+  if (reduced()) return; if (!x && !y) { x = innerWidth / 2; y = innerHeight / 2; }
+  for (let i = 0; i < 7; i++) { const s = h('span', { class: 'fly', 'aria-hidden': 'true' }, emoji); s.style.cssText = `left:${x}px;top:${y}px;--dx:${Math.random() * 120 - 60}px;--dy:${-(80 + Math.random() * 100)}px;animation-delay:${i * 50}ms`; s.addEventListener('animationend', () => s.remove()); document.body.append(s); }
+}
+function bubbles() { const w = h('div', { class: 'bubbles', 'aria-hidden': 'true' }); for (let i = 0; i < 10; i++) { const s = h('span'), z = 18 + Math.random() * 46; s.style.cssText = `left:${Math.random() * 100}%;width:${z}px;height:${z}px;animation-duration:${14 + Math.random() * 16}s;animation-delay:-${Math.random() * 20}s`; w.append(s); } return w; }
+function paintTyping() {
+  const t = $('#tp'), c = cur(); if (!t || !c) return; const ids = Object.keys(S.typing[c.id] || {}).map(Number); t.hidden = !ids.length; if (!ids.length) return;
+  t.replaceChildren(h('span', { class: 'dots', 'aria-hidden': 'true' }, h('i'), h('i'), h('i')), h('small', {}, ids.map(i => c.members.find(u => u.id === i)?.name || 'Someone').join(', ') + ' typing…'));
+}
+function paintJump() {
+  const b = $('#msgs'), j = $('#jump'); if (!b || !j) return; const away = b.scrollHeight - b.scrollTop - b.clientHeight > 200; if (!away) S.below = 0;
+  j.hidden = !away; j.replaceChildren('↓', S.below > 0 && h('span', { class: 'badge' }, S.below));
+}
+const linkify = t => t.split(/(https?:\/\/[^\s]+)/g).map((p, i) => i % 2 ? h('a', { href: p, target: '_blank', rel: 'noopener noreferrer nofollow' }, p) : p);
+const grow = el => { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 140) + 'px'; };
+const EMOJIS = '😀 😂 🥹 😍 😘 😎 🤔 😅 😭 😡 🥳 🤝 👍 👎 👏 🙏 💪 🙌 🔥 ❤️ 💔 ✨ 🎉 💯 ✅ ❌ 👀 🤗 😴 🤯 😇 🙈'.split(' ');
+function emojiPicker(e) {
+  e.stopPropagation(); const old = $('.emojis'); if (old) return old.remove(); const ta = $('textarea');
+  $('.composer').append(h('div', { class: 'emojis', role: 'dialog', 'aria-label': 'Emoji' }, EMOJIS.map(x => h('button', { type: 'button', 'aria-label': x, onclick: ev => { ev.stopPropagation(); const s = ta.selectionStart ?? ta.value.length; ta.setRangeText(x, s, ta.selectionEnd ?? s, 'end'); ta.dispatchEvent(new Event('input')); ta.focus(); } }, x))));
+}
+let ac; addEventListener('pointerdown', () => { ac ??= new (window.AudioContext || window.webkitAudioContext)(); }, { once: true });
+function blip(f, d = .09) {
+  if (!ac || localStorage.getItem('sound') === 'off') return; const o = ac.createOscillator(), g = ac.createGain();
+  o.frequency.value = f; g.gain.setValueAtTime(.06, ac.currentTime); g.gain.exponentialRampToValueAtTime(.0001, ac.currentTime + d); o.connect(g).connect(ac.destination); o.start(); o.stop(ac.currentTime + d);
+}
+
 // ---------- camera flip ----------
 async function flipCam() {
   const c = S.call; if (!c?.local) return;
